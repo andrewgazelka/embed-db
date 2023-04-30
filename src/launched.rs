@@ -7,8 +7,12 @@ use tokio::sync;
 use crate::{Entry, Idx, Key, SimilarityEntry};
 
 pub struct LaunchedCache<K, V> {
+    tx: sync::mpsc::Sender<CacheMessage<K, V>>,
     rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
-    data: Data<K, V>,
+    is_rebuilding: bool,
+    indexed_entries: Vec<Arc<Entry<K, V>>>,
+    indexed: Rannoy,
+    unindexed: Vec<Arc<Entry<K, V>>>,
 }
 
 pub enum CacheMessage<K, V> {
@@ -25,28 +29,16 @@ pub enum CacheMessage<K, V> {
         embedding: Vec<f32>,
         value: V,
     },
-    GetDataPreRebuild {
-        #[allow(clippy::type_complexity)]
-        tx: sync::oneshot::Sender<Option<Vec<Arc<Entry<K, V>>>>>,
-    },
+    Rebuild(sync::oneshot::Sender<bool>),
     UpdateDataPostRebuild {
         indexed_entries: Vec<Arc<Entry<K, V>>>,
         indexed: Rannoy,
+        tx: sync::oneshot::Sender<bool>,
     },
-}
-
-pub struct Data<K, V> {
-    is_rebuilding: bool,
-    indexed_entries: Vec<Arc<Entry<K, V>>>,
-    indexed: Rannoy,
-    unindexed: Vec<Arc<Entry<K, V>>>,
 }
 
 pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>>) -> Rannoy {
     let entries = entries.into_iter().collect::<Vec<_>>();
-
-    // let first_entry: &Entry<K,V> = entries.get(0)?;
-    // let dim = first_entry.key.embedding.len();
 
     let size = entries.len();
     let annoy = Rannoy::new(size);
@@ -62,29 +54,73 @@ pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>
     annoy
 }
 
-impl<K: Send + 'static, V: Send + 'static> LaunchedCache<K, V> {
-    pub fn new(rx: sync::mpsc::Receiver<CacheMessage<K, V>>, entries: Vec<Entry<K, V>>) -> Self {
+impl<K, V> LaunchedCache<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    pub fn new(
+        tx: sync::mpsc::Sender<CacheMessage<K, V>>,
+        rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
+        entries: Vec<Entry<K, V>>,
+    ) -> Self {
         let annoy = build(&entries);
 
         Self {
+            tx,
             rx,
-            data: Data {
-                is_rebuilding: false,
-                indexed_entries: entries.into_iter().map(Arc::new).collect(),
-                indexed: annoy,
-                unindexed: vec![],
-            },
+            is_rebuilding: false,
+            indexed_entries: entries.into_iter().map(Arc::new).collect(),
+            indexed: annoy,
+            unindexed: vec![],
         }
     }
 
     pub async fn run(mut self) {
         while let Some(msg) = self.rx.recv().await {
-            self.data.process_message(msg);
+            self.process_message(msg);
         }
     }
 }
 
-impl<K, V> Data<K, V> {
+impl<K, V> LaunchedCache<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn rebuild(&mut self, tx: sync::oneshot::Sender<bool>) {
+        if self.is_rebuilding {
+            let _ = tx.send(false);
+            return;
+        }
+        self.is_rebuilding = true;
+
+        let mut indexed = self.indexed_entries.clone();
+        indexed.extend(self.unindexed.clone());
+
+        let self_tx = self.tx.clone();
+
+        tokio::spawn(async move {
+            let (annoy, data) = tokio::task::spawn_blocking({
+                move || {
+                    let build_data = indexed.iter().map(AsRef::as_ref);
+                    let build = build(build_data);
+                    (build, indexed)
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("failed to spawn blocking task"));
+
+            self_tx
+                .send(CacheMessage::UpdateDataPostRebuild {
+                    indexed_entries: data,
+                    indexed: annoy,
+                    tx,
+                })
+                .await
+                .unwrap_or_else(|_| panic!("failed to send message"));
+        });
+    }
     fn process_message(&mut self, message: CacheMessage<K, V>) {
         match message {
             CacheMessage::GetById(id, tx) => {
@@ -158,19 +194,13 @@ impl<K, V> Data<K, V> {
 
                 self.unindexed.push(entry.into());
             }
-            CacheMessage::GetDataPreRebuild { tx } => {
-                if self.is_rebuilding {
-                    let _ = tx.send(None);
-                    return;
-                }
-                self.is_rebuilding = true;
-                let mut indexed = self.indexed_entries.clone();
-                indexed.extend(self.unindexed.clone());
-                let _ = tx.send(Some(indexed));
+            CacheMessage::Rebuild(tx) => {
+                self.rebuild(tx);
             }
             CacheMessage::UpdateDataPostRebuild {
                 indexed,
                 indexed_entries,
+                tx,
             } => {
                 let prev_len = self.indexed_entries.len();
                 let new_len = indexed_entries.len();
@@ -181,6 +211,8 @@ impl<K, V> Data<K, V> {
                 self.unindexed.drain(0..diff_len);
 
                 self.is_rebuilding = false;
+
+                let _ = tx.send(true);
             }
         }
     }

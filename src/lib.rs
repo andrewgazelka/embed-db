@@ -24,18 +24,19 @@ trait Embeddable {
     async fn embed(&self) -> Result<Vec<f32>, Self::Error>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Key<K> {
     pub value: K,
     pub embedding: Vec<f32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Entry<K, V> {
     pub key: Key<K>,
     pub value: V,
 }
 
+#[derive(Debug)]
 pub struct SimilarityEntry<K, V> {
     pub entry: Arc<Entry<K, V>>,
     pub similarity: f32,
@@ -47,13 +48,20 @@ pub struct Cache<K, V> {
     _handle: JoinHandle<()>,
 }
 
-impl<K: Send + Sync + 'static, V: Send + Sync + 'static> From<Vec<Entry<K, V>>> for Cache<K, V> {
+impl<K, V> From<Vec<Entry<K, V>>> for Cache<K, V>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     fn from(entries: Vec<Entry<K, V>>) -> Self {
         let (tx, rx) = sync::mpsc::channel(100);
 
-        let handle = tokio::spawn(async move {
-            let cache = LaunchedCache::new(rx, entries);
-            cache.run().await;
+        let handle = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                let cache = LaunchedCache::new(tx, rx, entries);
+                cache.run().await;
+            }
         });
 
         Self {
@@ -70,9 +78,12 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Cache<K, V> {
     pub fn new() -> Result<Self, MappingError> {
         let (tx, rx) = sync::mpsc::channel(100);
 
-        let handle = tokio::spawn(async move {
-            let cache = LaunchedCache::new(rx, vec![]);
-            cache.run().await;
+        let handle = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                let cache = LaunchedCache::new(tx, rx, vec![]);
+                cache.run().await;
+            }
         });
 
         Ok(Self {
@@ -83,45 +94,17 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Cache<K, V> {
 
     /// # Errors
     /// - error if the message could not be sent
-    pub async fn rebuild(&self) -> anyhow::Result<()> {
+    pub async fn rebuild(&self) -> anyhow::Result<bool> {
         let (tx, rx) = sync::oneshot::channel();
 
-        if self
-            .tx
-            .send(CacheMessage::GetDataPreRebuild { tx })
+        self.tx
+            .send(CacheMessage::Rebuild(tx))
             .await
-            .is_err()
-        {
-            bail!("failed to send message");
-        }
+            .map_err(|_| anyhow::anyhow!("could not send message"))?;
 
-        let Some(data) = rx.await? else {
-            // we are already rebuilding
-            return Ok(());
-        };
+        let res = rx.await.map_err(|_| anyhow::anyhow!("could not receive message"))?;
 
-        let (annoy, data) = tokio::task::spawn_blocking({
-            move || {
-                let build_data = data.iter().map(AsRef::as_ref);
-                let build = launched::build(build_data);
-                (build, data)
-            }
-        })
-        .await?;
-
-        if self
-            .tx
-            .send(CacheMessage::UpdateDataPostRebuild {
-                indexed_entries: data,
-                indexed: annoy,
-            })
-            .await
-            .is_err()
-        {
-            bail!("failed to send message");
-        }
-
-        Ok(())
+        Ok(res)
     }
 
     pub async fn get_by_id(&self, id: Idx) -> Option<Arc<Entry<K, V>>> {
