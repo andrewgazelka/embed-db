@@ -1,0 +1,18 @@
+[package]
+name = "embed-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rannoy = { git = "https://github.com/andrewgazelka/rs-annoy", branch = "fix-rannoy-send" }
+serde = "1.0.160"
+simd-json = "0.9.1"
+simd-json-derive = "0.9.0"
+tokio = { version = "1.28.0", features = ["full"] }
+thiserror = "1.0.40"
+async-trait = "0.1.68"
+parking_lot = "0.12.1"
+anyhow = "1.0.70"
+ndarray = "0.15.6"
+float-ord = "0.3.2"
+rayon = "1.7.0"
