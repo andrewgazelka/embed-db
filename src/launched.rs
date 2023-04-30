@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use float_ord::FloatOrd;
 use rannoy::Rannoy;
 use tokio::sync;
@@ -10,14 +8,14 @@ pub struct LaunchedCache<K, V> {
     tx: sync::mpsc::Sender<CacheMessage<K, V>>,
     rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
     is_rebuilding: bool,
-    indexed_entries: Vec<Arc<Entry<K, V>>>,
+    indexed_entries: Vec<Entry<K, V>>,
     indexed: Rannoy,
-    unindexed: Vec<Arc<Entry<K, V>>>,
+    unindexed: Vec<Entry<K, V>>,
 }
 
 pub enum CacheMessage<K, V> {
     /// get an entry by ID
-    GetById(Idx, sync::oneshot::Sender<Option<Arc<Entry<K, V>>>>),
+    GetById(Idx, sync::oneshot::Sender<Option<Entry<K, V>>>),
     /// get closest entry
     Closest {
         n: usize,
@@ -31,7 +29,7 @@ pub enum CacheMessage<K, V> {
     },
     Rebuild(sync::oneshot::Sender<bool>),
     UpdateDataPostRebuild {
-        indexed_entries: Vec<Arc<Entry<K, V>>>,
+        indexed_entries: Vec<Entry<K, V>>,
         indexed: Rannoy,
         tx: sync::oneshot::Sender<bool>,
     },
@@ -56,8 +54,8 @@ pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>
 
 impl<K, V> LaunchedCache<K, V>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
 {
     pub fn new(
         tx: sync::mpsc::Sender<CacheMessage<K, V>>,
@@ -70,7 +68,7 @@ where
             tx,
             rx,
             is_rebuilding: false,
-            indexed_entries: entries.into_iter().map(Arc::new).collect(),
+            indexed_entries: entries,
             indexed: annoy,
             unindexed: vec![],
         }
@@ -85,8 +83,8 @@ where
 
 impl<K, V> LaunchedCache<K, V>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
 {
     fn rebuild(&mut self, tx: sync::oneshot::Sender<bool>) {
         if self.is_rebuilding {
@@ -103,8 +101,7 @@ where
         tokio::spawn(async move {
             let (annoy, data) = tokio::task::spawn_blocking({
                 move || {
-                    let build_data = indexed.iter().map(AsRef::as_ref);
-                    let build = build(build_data);
+                    let build = build(&indexed);
                     (build, indexed)
                 }
             })
@@ -192,7 +189,7 @@ where
                     value,
                 };
 
-                self.unindexed.push(entry.into());
+                self.unindexed.push(entry);
             }
             CacheMessage::Rebuild(tx) => {
                 self.rebuild(tx);

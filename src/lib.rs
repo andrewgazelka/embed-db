@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use anyhow::bail;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync;
@@ -38,7 +35,7 @@ pub struct Entry<K, V> {
 
 #[derive(Debug)]
 pub struct SimilarityEntry<K, V> {
-    pub entry: Arc<Entry<K, V>>,
+    pub entry: Entry<K, V>,
     pub similarity: f32,
 }
 
@@ -50,8 +47,8 @@ pub struct Cache<K, V> {
 
 impl<K, V> From<Vec<Entry<K, V>>> for Cache<K, V>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
 {
     fn from(entries: Vec<Entry<K, V>>) -> Self {
         let (tx, rx) = sync::mpsc::channel(100);
@@ -72,7 +69,11 @@ where
 }
 
 // TODO: why do we need Sync bound
-impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Cache<K, V> {
+impl<K, V> Cache<K, V>
+where
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
+{
     /// # Errors
     /// - returns [`MappingError`]
     pub fn new() -> Result<Self, MappingError> {
@@ -102,12 +103,14 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Cache<K, V> {
             .await
             .map_err(|_| anyhow::anyhow!("could not send message"))?;
 
-        let res = rx.await.map_err(|_| anyhow::anyhow!("could not receive message"))?;
+        let res = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("could not receive message"))?;
 
         Ok(res)
     }
 
-    pub async fn get_by_id(&self, id: Idx) -> Option<Arc<Entry<K, V>>> {
+    pub async fn get_by_id(&self, id: Idx) -> Option<Entry<K, V>> {
         let (tx, rx) = sync::oneshot::channel();
         if self.tx.send(CacheMessage::GetById(id, tx)).await.is_err() {
             return None;
