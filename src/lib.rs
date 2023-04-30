@@ -36,6 +36,11 @@ pub struct Entry<K, V> {
     pub value: V,
 }
 
+pub struct SimilarityEntry<K, V> {
+    pub entry: Arc<Entry<K, V>>,
+    pub similarity: f32,
+}
+
 pub struct Cache<K, V> {
     tx: sync::mpsc::Sender<CacheMessage<K, V>>,
     // TODO: in the future use handle
@@ -127,7 +132,7 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Cache<K, V> {
         rx.await.ok().flatten()
     }
 
-    pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<Arc<Entry<K, V>>> {
+    pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<SimilarityEntry<K, V>> {
         let (tx, rx) = sync::oneshot::channel();
         if self
             .tx

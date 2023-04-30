@@ -4,7 +4,7 @@ use float_ord::FloatOrd;
 use rannoy::Rannoy;
 use tokio::sync;
 
-use crate::{Entry, Idx, Key};
+use crate::{Entry, Idx, Key, SimilarityEntry};
 
 pub struct LaunchedCache<K, V> {
     rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
@@ -18,7 +18,7 @@ pub enum CacheMessage<K, V> {
     Closest {
         n: usize,
         embedding: Vec<f32>,
-        tx: sync::oneshot::Sender<Vec<Arc<Entry<K, V>>>>,
+        tx: sync::oneshot::Sender<Vec<SimilarityEntry<K, V>>>,
     },
     Add {
         key: K,
@@ -121,14 +121,23 @@ impl<K, V> Data<K, V> {
                 res.extend(self.unindexed.clone());
 
                 // sort by distance to embedding
-                res.sort_by_cached_key(|entry| {
-                    let entry_embedding = &entry.key.embedding;
-                    let entry_embedding = ndarray::arr1(entry_embedding);
 
-                    let dot = embedding_arr.dot(&entry_embedding);
+                let mut res = res
+                    .into_iter()
+                    .map(|entry| {
+                        let entry_embedding = &entry.key.embedding;
+                        let entry_embedding = ndarray::arr1(entry_embedding);
 
-                    FloatOrd(-dot)
-                });
+                        let dot = embedding_arr.dot(&entry_embedding);
+
+                        SimilarityEntry {
+                            entry,
+                            similarity: dot,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                res.sort_unstable_by_key(|entry| FloatOrd(-entry.similarity));
 
                 res.truncate(n);
 
