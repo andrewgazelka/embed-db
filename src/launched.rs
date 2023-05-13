@@ -2,40 +2,39 @@ use float_ord::FloatOrd;
 use rannoy::Rannoy;
 use tokio::sync;
 
-use crate::{Entry, Idx, Key, SimilarityEntry};
+use crate::{Entry, Idx, SimilarityEntry};
 
-pub struct LaunchedCache<K, V> {
-    tx: sync::mpsc::Sender<CacheMessage<K, V>>,
-    rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
+pub struct LaunchedCache<T> {
+    tx: sync::mpsc::Sender<CacheMessage<T>>,
+    rx: sync::mpsc::Receiver<CacheMessage<T>>,
     is_rebuilding: bool,
-    indexed_entries: Vec<Entry<K, V>>,
+    indexed_entries: Vec<Entry<T>>,
     indexed: Rannoy,
-    unindexed: Vec<Entry<K, V>>,
+    unindexed: Vec<Entry<T>>,
 }
 
-pub enum CacheMessage<K, V> {
+pub enum CacheMessage<T> {
     /// get an entry by ID
-    GetById(Idx, sync::oneshot::Sender<Option<Entry<K, V>>>),
+    GetById(Idx, sync::oneshot::Sender<Option<Entry<T>>>),
     /// get closest entry
     Closest {
         n: usize,
         embedding: Vec<f32>,
-        tx: sync::oneshot::Sender<Vec<SimilarityEntry<K, V>>>,
+        tx: sync::oneshot::Sender<Vec<SimilarityEntry<T>>>,
     },
     Add {
-        key: K,
+        key: T,
         embedding: Vec<f32>,
-        value: V,
     },
     Rebuild(sync::oneshot::Sender<bool>),
     UpdateDataPostRebuild {
-        indexed_entries: Vec<Entry<K, V>>,
+        indexed_entries: Vec<Entry<T>>,
         indexed: Rannoy,
         tx: sync::oneshot::Sender<bool>,
     },
 }
 
-pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>>) -> Rannoy {
+pub fn build<'a, T: 'a>(entries: impl IntoIterator<Item = &'a Entry<T>>) -> Rannoy {
     let entries = entries.into_iter().collect::<Vec<_>>();
 
     let size = entries.len();
@@ -43,7 +42,7 @@ pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>
 
     for (i, entry) in entries.into_iter().enumerate() {
         let i = i32::try_from(i).unwrap();
-        let embedding = entry.key.embedding.clone();
+        let embedding = entry.embedding.clone();
         annoy.add_item(i, &embedding);
     }
 
@@ -52,15 +51,14 @@ pub fn build<'a, K: 'a, V: 'a>(entries: impl IntoIterator<Item = &'a Entry<K, V>
     annoy
 }
 
-impl<K, V> LaunchedCache<K, V>
+impl<T> LaunchedCache<T>
 where
-    K: Send + Sync + Clone + 'static,
-    V: Send + Sync + Clone + 'static,
+    T: Send + Sync + Clone + 'static,
 {
     pub fn new(
-        tx: sync::mpsc::Sender<CacheMessage<K, V>>,
-        rx: sync::mpsc::Receiver<CacheMessage<K, V>>,
-        entries: Vec<Entry<K, V>>,
+        tx: sync::mpsc::Sender<CacheMessage<T>>,
+        rx: sync::mpsc::Receiver<CacheMessage<T>>,
+        entries: Vec<Entry<T>>,
     ) -> Self {
         let annoy = build(&entries);
 
@@ -81,10 +79,9 @@ where
     }
 }
 
-impl<K, V> LaunchedCache<K, V>
+impl<T> LaunchedCache<T>
 where
-    K: Send + Sync + Clone + 'static,
-    V: Send + Sync + Clone + 'static,
+    T: Send + Sync + Clone + 'static,
 {
     fn rebuild(&mut self, tx: sync::oneshot::Sender<bool>) {
         if self.is_rebuilding {
@@ -118,7 +115,7 @@ where
                 .unwrap_or_else(|_| panic!("failed to send message"));
         });
     }
-    fn process_message(&mut self, message: CacheMessage<K, V>) {
+    fn process_message(&mut self, message: CacheMessage<T>) {
         match message {
             CacheMessage::GetById(id, tx) => {
                 let entry = self.indexed_entries.get(id).cloned();
@@ -158,7 +155,7 @@ where
                 let mut res = res
                     .into_iter()
                     .map(|entry| {
-                        let entry_embedding = &entry.key.embedding;
+                        let entry_embedding = &entry.embedding;
                         let entry_embedding = ndarray::arr1(entry_embedding);
 
                         let dot = embedding_arr.dot(&entry_embedding);
@@ -176,17 +173,10 @@ where
 
                 let _ = tx.send(res);
             }
-            CacheMessage::Add {
-                key,
-                value,
-                embedding,
-            } => {
+            CacheMessage::Add { key, embedding } => {
                 let entry = Entry {
-                    key: Key {
-                        value: key,
-                        embedding,
-                    },
-                    value,
+                    value: key,
+                    embedding,
                 };
 
                 self.unindexed.push(entry);

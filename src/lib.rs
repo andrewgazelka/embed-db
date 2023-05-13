@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync;
 use tokio::task::JoinHandle;
@@ -15,42 +14,29 @@ pub enum MappingError {
     Io(#[from] std::io::Error),
 }
 
-#[async_trait]
-trait Embeddable {
-    type Error;
-    async fn embed(&self) -> Result<Vec<f32>, Self::Error>;
-}
-
 #[derive(Clone, Debug)]
-pub struct Key<K> {
-    pub value: K,
+pub struct Entry<T> {
+    pub value: T,
     pub embedding: Vec<f32>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Entry<K, V> {
-    pub key: Key<K>,
-    pub value: V,
-}
-
 #[derive(Debug)]
-pub struct SimilarityEntry<K, V> {
-    pub entry: Entry<K, V>,
+pub struct SimilarityEntry<T> {
+    pub entry: Entry<T>,
     pub similarity: f32,
 }
 
-pub struct Cache<K, V> {
-    tx: sync::mpsc::Sender<CacheMessage<K, V>>,
+pub struct Cache<T> {
+    tx: sync::mpsc::Sender<CacheMessage<T>>,
     // TODO: in the future use handle
     _handle: JoinHandle<()>,
 }
 
-impl<K, V> From<Vec<Entry<K, V>>> for Cache<K, V>
+impl<T> From<Vec<Entry<T>>> for Cache<T>
 where
-    K: Send + Sync + Clone + 'static,
-    V: Send + Sync + Clone + 'static,
+    T: Send + Sync + Clone + 'static,
 {
-    fn from(entries: Vec<Entry<K, V>>) -> Self {
+    fn from(entries: Vec<Entry<T>>) -> Self {
         let (tx, rx) = sync::mpsc::channel(100);
 
         let handle = tokio::spawn({
@@ -69,10 +55,9 @@ where
 }
 
 // TODO: why do we need Sync bound
-impl<K, V> Cache<K, V>
+impl<T> Cache<T>
 where
-    K: Send + Sync + Clone + 'static,
-    V: Send + Sync + Clone + 'static,
+    T: Send + Sync + Clone + 'static,
 {
     /// # Errors
     /// - returns [`MappingError`]
@@ -110,7 +95,7 @@ where
         Ok(res)
     }
 
-    pub async fn get_by_id(&self, id: Idx) -> Option<Entry<K, V>> {
+    pub async fn get_by_id(&self, id: Idx) -> Option<Entry<T>> {
         let (tx, rx) = sync::oneshot::channel();
         if self.tx.send(CacheMessage::GetById(id, tx)).await.is_err() {
             return None;
@@ -118,7 +103,7 @@ where
         rx.await.ok().flatten()
     }
 
-    pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<SimilarityEntry<K, V>> {
+    pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<SimilarityEntry<T>> {
         let (tx, rx) = sync::oneshot::channel();
         if self
             .tx
@@ -133,12 +118,11 @@ where
 
     /// # Errors
     /// - error if the message could not be sent
-    pub async fn add(&self, key: K, embedding: Vec<f32>, value: V) -> anyhow::Result<()> {
+    pub async fn add(&self, key: T, embedding: Vec<f32>) -> anyhow::Result<()> {
         self.tx
             .send(CacheMessage::Add {
                 key,
                 embedding,
-                value,
             })
             .await
             .map_err(|_| anyhow::anyhow!("failed to send message"))?;
