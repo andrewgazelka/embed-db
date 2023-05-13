@@ -4,13 +4,14 @@ use tokio::sync;
 
 use crate::{Entry, Idx, SimilarityEntry};
 
-pub struct LaunchedCache<T> {
+pub struct CacheActor<T> {
     tx: sync::mpsc::Sender<CacheMessage<T>>,
     rx: sync::mpsc::Receiver<CacheMessage<T>>,
     is_rebuilding: bool,
     indexed_entries: Vec<Entry<T>>,
     indexed: Rannoy,
     unindexed: Vec<Entry<T>>,
+    rebuild_threshold: Option<usize>,
 }
 
 pub enum CacheMessage<T> {
@@ -25,6 +26,9 @@ pub enum CacheMessage<T> {
     Add {
         key: T,
         embedding: Vec<f32>,
+    },
+    SetRebuildThreshold {
+        threshold: usize,
     },
     Rebuild(sync::oneshot::Sender<bool>),
     UpdateDataPostRebuild {
@@ -51,7 +55,7 @@ pub fn build<'a, T: 'a>(entries: impl IntoIterator<Item = &'a Entry<T>>) -> Rann
     annoy
 }
 
-impl<T> LaunchedCache<T>
+impl<T> CacheActor<T>
 where
     T: Send + Sync + Clone + 'static,
 {
@@ -69,6 +73,7 @@ where
             indexed_entries: entries,
             indexed: annoy,
             unindexed: vec![],
+            rebuild_threshold: None,
         }
     }
 
@@ -79,7 +84,7 @@ where
     }
 }
 
-impl<T> LaunchedCache<T>
+impl<T> CacheActor<T>
 where
     T: Send + Sync + Clone + 'static,
 {
@@ -180,6 +185,15 @@ where
                 };
 
                 self.unindexed.push(entry);
+
+                if let Some(threshold) = self.rebuild_threshold {
+                    if self.unindexed.len() >= threshold {
+                        // unused channel. TODO: is this a good practice?
+                        let (tx, rx) = sync::oneshot::channel();
+
+                        self.rebuild(tx);
+                    }
+                }
             }
             CacheMessage::Rebuild(tx) => {
                 self.rebuild(tx);
@@ -200,6 +214,9 @@ where
                 self.is_rebuilding = false;
 
                 let _ = tx.send(true);
+            }
+            CacheMessage::SetRebuildThreshold { threshold } => {
+                self.rebuild_threshold = Some(threshold);
             }
         }
     }

@@ -2,9 +2,9 @@ use thiserror::Error;
 use tokio::sync;
 use tokio::task::JoinHandle;
 
-use crate::launched::{CacheMessage, LaunchedCache};
+use crate::actor::{CacheActor, CacheMessage};
 
-mod launched;
+mod actor;
 
 type Idx = usize;
 
@@ -42,7 +42,7 @@ where
         let handle = tokio::spawn({
             let tx = tx.clone();
             async move {
-                let cache = LaunchedCache::new(tx, rx, entries);
+                let cache = CacheActor::new(tx, rx, entries);
                 cache.run().await;
             }
         });
@@ -67,7 +67,7 @@ where
         let handle = tokio::spawn({
             let tx = tx.clone();
             async move {
-                let cache = LaunchedCache::new(tx, rx, vec![]);
+                let cache = CacheActor::new(tx, rx, vec![]);
                 cache.run().await;
             }
         });
@@ -103,6 +103,11 @@ where
         rx.await.ok().flatten()
     }
 
+    pub async fn set_rebuild_threshold(&self, threshold: usize) {
+        let message = CacheMessage::SetRebuildThreshold { threshold };
+        let _ = self.tx.send(message).await;
+    }
+
     pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<SimilarityEntry<T>> {
         let (tx, rx) = sync::oneshot::channel();
         if self
@@ -120,10 +125,7 @@ where
     /// - error if the message could not be sent
     pub async fn add(&self, key: T, embedding: Vec<f32>) -> anyhow::Result<()> {
         self.tx
-            .send(CacheMessage::Add {
-                key,
-                embedding,
-            })
+            .send(CacheMessage::Add { key, embedding })
             .await
             .map_err(|_| anyhow::anyhow!("failed to send message"))?;
         Ok(())
