@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use thiserror::Error;
 use tokio::sync;
 use tokio::task::JoinHandle;
@@ -32,28 +34,6 @@ pub struct Cache<T> {
     _handle: JoinHandle<()>,
 }
 
-impl<T> From<Vec<Entry<T>>> for Cache<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
-    fn from(entries: Vec<Entry<T>>) -> Self {
-        let (tx, rx) = sync::mpsc::channel(100);
-
-        let handle = tokio::spawn({
-            let tx = tx.clone();
-            async move {
-                let cache = CacheActor::new(tx, rx, entries);
-                cache.run().await;
-            }
-        });
-
-        Self {
-            tx,
-            _handle: handle,
-        }
-    }
-}
-
 // TODO: why do we need Sync bound
 impl<T> Cache<T>
 where
@@ -61,13 +41,13 @@ where
 {
     /// # Errors
     /// - returns [`MappingError`]
-    pub fn new() -> Result<Self, MappingError> {
+    pub fn new(rebuild_threshold: Option<NonZeroUsize>) -> Result<Self, MappingError> {
         let (tx, rx) = sync::mpsc::channel(100);
 
         let handle = tokio::spawn({
             let tx = tx.clone();
             async move {
-                let cache = CacheActor::new(tx, rx, vec![]);
+                let cache = CacheActor::new(tx, rx, vec![], rebuild_threshold);
                 cache.run().await;
             }
         });
@@ -76,6 +56,26 @@ where
             tx,
             _handle: handle,
         })
+    }
+
+    pub fn new_from_entries(
+        entries: Vec<Entry<T>>,
+        rebuild_threshold: Option<NonZeroUsize>,
+    ) -> Self {
+        let (tx, rx) = sync::mpsc::channel(100);
+
+        let handle = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                let cache = CacheActor::new(tx, rx, entries, rebuild_threshold);
+                cache.run().await;
+            }
+        });
+
+        Self {
+            tx,
+            _handle: handle,
+        }
     }
 
     /// # Errors
@@ -101,11 +101,6 @@ where
             return None;
         }
         rx.await.ok().flatten()
-    }
-
-    pub async fn set_rebuild_threshold(&self, threshold: usize) {
-        let message = CacheMessage::SetRebuildThreshold { threshold };
-        let _ = self.tx.send(message).await;
     }
 
     pub async fn get_closest(&self, n: usize, embedding: Vec<f32>) -> Vec<SimilarityEntry<T>> {

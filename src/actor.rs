@@ -1,5 +1,6 @@
 use float_ord::FloatOrd;
 use rannoy::Rannoy;
+use std::num::NonZeroUsize;
 use tokio::sync;
 
 use crate::{Entry, Idx, SimilarityEntry};
@@ -11,7 +12,7 @@ pub struct CacheActor<T> {
     indexed_entries: Vec<Entry<T>>,
     indexed: Rannoy,
     unindexed: Vec<Entry<T>>,
-    rebuild_threshold: Option<usize>,
+    rebuild_threshold: Option<NonZeroUsize>,
 }
 
 pub enum CacheMessage<T> {
@@ -26,9 +27,6 @@ pub enum CacheMessage<T> {
     Add {
         key: T,
         embedding: Vec<f32>,
-    },
-    SetRebuildThreshold {
-        threshold: usize,
     },
     Rebuild(sync::oneshot::Sender<bool>),
     UpdateDataPostRebuild {
@@ -63,6 +61,7 @@ where
         tx: sync::mpsc::Sender<CacheMessage<T>>,
         rx: sync::mpsc::Receiver<CacheMessage<T>>,
         entries: Vec<Entry<T>>,
+        rebuild_threshold: Option<NonZeroUsize>,
     ) -> Self {
         let annoy = build(&entries);
 
@@ -73,7 +72,7 @@ where
             indexed_entries: entries,
             indexed: annoy,
             unindexed: vec![],
-            rebuild_threshold: None,
+            rebuild_threshold,
         }
     }
 
@@ -187,9 +186,9 @@ where
                 self.unindexed.push(entry);
 
                 if let Some(threshold) = self.rebuild_threshold {
-                    if self.unindexed.len() >= threshold {
+                    if self.unindexed.len() >= threshold.get() {
                         // unused channel. TODO: is this a good practice?
-                        let (tx, rx) = sync::oneshot::channel();
+                        let (tx, _) = sync::oneshot::channel();
 
                         self.rebuild(tx);
                     }
@@ -214,9 +213,6 @@ where
                 self.is_rebuilding = false;
 
                 let _ = tx.send(true);
-            }
-            CacheMessage::SetRebuildThreshold { threshold } => {
-                self.rebuild_threshold = Some(threshold);
             }
         }
     }

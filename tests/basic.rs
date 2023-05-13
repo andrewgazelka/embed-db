@@ -1,10 +1,12 @@
+use std::num::NonZeroUsize;
+
 use anyhow::Context;
 
 use embed_db::{Cache, Entry};
 
 #[tokio::test]
 async fn test_new() -> anyhow::Result<()> {
-    let cache = Cache::new()?;
+    let cache = Cache::new(None)?;
 
     cache.add("hello", vec![1.0, 0.0, 0.0]).await?;
 
@@ -34,7 +36,7 @@ async fn test_from_existing() {
         embedding: vec![0.7, 0.0, 0.7],
     };
 
-    let cache = Cache::from(vec![entry]);
+    let cache = Cache::new_from_entries(vec![entry], NonZeroUsize::new(123));
 
     let first = cache
         .get_by_id(0)
